@@ -104,6 +104,14 @@
 	"engines": {
 		"node": ">=20.0.0"
 	},
+	"peerDependencies": {
+		"@azure/identity": ">=4.0.0"
+	},
+	"peerDependenciesMeta": {
+		"@azure/identity": {
+			"optional": true
+		}
+	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0",

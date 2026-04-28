@@ -11,6 +11,8 @@
 
 // Anthropic
 export { anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken } from "./anthropic.js";
+// Azure Foundry
+export { azureFoundryOAuthProvider } from "./azure-foundry.js";
 // GitHub Copilot
 export {
 	getGitHubCopilotBaseUrl,
@@ -33,6 +35,7 @@ export * from "./types.js";
 // ============================================================================
 
 import { anthropicOAuthProvider } from "./anthropic.js";
+import { azureFoundryOAuthProvider } from "./azure-foundry.js";
 import { githubCopilotOAuthProvider } from "./github-copilot.js";
 import { antigravityOAuthProvider } from "./google-antigravity.js";
 import { geminiCliOAuthProvider } from "./google-gemini-cli.js";
@@ -41,6 +44,7 @@ import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProvide
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	anthropicOAuthProvider,
+	azureFoundryOAuthProvider,
 	githubCopilotOAuthProvider,
 	geminiCliOAuthProvider,
 	antigravityOAuthProvider,

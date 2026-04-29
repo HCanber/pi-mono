@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added Azure Foundry OAuth provider for authenticating against Azure Foundry endpoints via `DefaultAzureCredential`. Supports proxying OpenAI, Anthropic, Google, and other models through Azure with Bearer token auth. Requires optional peer dependency `@azure/identity`.
-
 ### Fixed
 
 - Removed generated Cloudflare Workers AI `User-Agent` model headers so attribution can be controlled by callers.

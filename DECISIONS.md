@@ -2,7 +2,7 @@
 
 ## Conversation Memory
 
-- The `packages/ai` Azure Foundry OAuth provider attempt was exploratory only. It was created as a first attempt at the integration and is not needed by anything else. The implementation may delete or rewrite all files listed in `packages/ai/WIP.md`.
+- The old `packages/ai` Azure Foundry OAuth provider attempt was exploratory only and has been removed. It was not needed by anything else.
 - Foundry endpoint setup must not use generic `/login azure-foundry`. The generic OAuth login path persists `{ type: "oauth", ...credentials }` under a static provider id, but Foundry needs `{ type: "azure-foundry", endpoint }` under a user-selected dynamic endpoint key.
 - Foundry Bearer tokens must be applied per request. Do not store an `Authorization` header in `model.headers` at model creation time because Azure AD tokens are short-lived and acquired on demand.
 

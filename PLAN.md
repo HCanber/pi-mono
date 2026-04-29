@@ -80,22 +80,7 @@ Changes to `AuthStorage`:
   - `addFoundryEndpoint(key: string, endpoint: string): void` — stores `{ type: "azure-foundry", endpoint }` under the given key.
   - `removeFoundryEndpoint(key: string): void` — removes the entry.
 
-#### Step 2: Remove obsolete `packages/ai` Azure Foundry OAuth files
-
-Required changes:
-
-- Remove the obsolete `packages/ai` OAuth-provider implementation:
-  - Delete `packages/ai/src/utils/oauth/azure-foundry.ts`.
-  - Remove its exports/imports/registration from `packages/ai/src/utils/oauth/index.ts`.
-  - Delete `packages/ai/test/azure-foundry-oauth.test.ts`.
-  - Remove the `@azure/identity` optional peer dependency from `packages/ai/package.json` if no other `packages/ai` code uses it.
-  - Remove the stale `packages/ai/CHANGELOG.md` entry for the `packages/ai` OAuth provider.
-  - Delete `packages/ai/WIP.md`.
-- Do not expose Azure Foundry in the generic OAuth provider selector used by `/login`.
-- Put endpoint creation in `/foundry add-endpoint`, which directly calls `authStorage.addFoundryEndpoint(key, endpoint)`.
-- Put token acquisition in a shared helper used by endpoint validation and `AuthStorage.getApiKey()`; do not persist Azure AD access tokens.
-
-#### Step 3: Settings schema — `FoundryDeployment` in `SettingsManager`
+#### Step 2: Settings schema — `FoundryDeployment` in `SettingsManager`
 
 Add to `packages/coding-agent/src/core/settings-manager.ts`:
 
@@ -118,11 +103,11 @@ Add getters/setters:
 - `removeFoundryDeployment(endpointKey: string, deploymentId: string): void`
 - `removeFoundryDeploymentsForEndpoint(endpointKey: string): void`
 
-#### Step 4: `ModelRegistry` — load Foundry deployments
+#### Step 3: `ModelRegistry` — load Foundry deployments
 
-Add `setFoundryDeployments(deployments: FoundryDeployment[])` to `ModelRegistry`.
+Add `setFoundryDeploymentSource(getter: () => FoundryDeployment[])` to `ModelRegistry`. This stores a getter callback (not a snapshot) so that every `refresh()` → `loadModels()` call reads the current deployments from `SettingsManager`.
 
-In `loadModels()`, after the existing OAuth `modifyModels` loop (~L381), convert each `FoundryDeployment` to a `Model<Api>`:
+In `loadModels()`, after the existing OAuth `modifyModels` loop (~L381), call `this.foundryDeploymentGetter?.() ?? []` and convert each `FoundryDeployment` to a `Model<Api>`:
 
 - Look up source model via built-in registry: `getModel(deployment.sourceProvider, deployment.sourceModelId)`
 - Copy `api`, `contextWindow`, `maxTokens`, `reasoning`, `input`, `cost` from source
@@ -137,7 +122,7 @@ No `modifyModels()` call needed for Foundry models.
 
 Do not inject `Authorization` into `model.headers` during model creation. Apply Bearer auth per request through `getApiKeyAndHeaders()` via `authHeader`.
 
-#### Step 5: Interactive management (`/foundry` command)
+#### Step 4: Interactive management (`/foundry` command)
 
 **`/foundry add-endpoint`:**
 1. User enters a name (e.g., `my-resource`, auto-prefixed to `azure-foundry-my-resource`)
@@ -172,13 +157,13 @@ Do not inject `Authorization` into `model.headers` during model creation. Apply 
 
 **`/foundry list`:** Show endpoints and their deployments.
 
-#### Step 6: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` — post endpoint add
+#### Step 5: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` — post endpoint add
 
 After `/foundry add-endpoint` succeeds, check if `settingsManager.getFoundryDeploymentsForEndpoint(endpointKey)` is empty. If so, prompt the user to run `/foundry add` to configure models.
 
 For model auto-selection: `availableModels.filter((model) => model.provider === endpointKey)` finds user's models for that endpoint.
 
-#### Step 7: Env var activation
+#### Step 6: Env var activation
 
 Detect `AZURE_FOUNDRY_ENDPOINT` at startup. Optionally `AZURE_FOUNDRY_KEY` for the credential name (defaults to `azure-foundry-env`).
 
@@ -188,8 +173,8 @@ Sequence:
 1. `authStorage` created (L134)
 2. Detect `AZURE_FOUNDRY_ENDPOINT` → `authStorage.addFoundryEndpoint("azure-foundry-env", endpoint)`
 3. `settingsManager` + `modelRegistry` created
-4. `modelRegistry.setFoundryDeployments(settingsManager.getFoundryDeployments())`
-5. `modelRegistry.refresh()` → loads foundry models with endpoint baseUrl; Authorization is resolved per request in `getApiKeyAndHeaders()`
+4. `modelRegistry.setFoundryDeploymentSource(() => settingsManager.getFoundryDeployments())`
+5. `modelRegistry.refresh()` → getter reads current deployments from settings, loads foundry models with endpoint baseUrl; Authorization is resolved per request in `getApiKeyAndHeaders()`
 6. Extensions register providers (L147-157)
 7. Services returned → model resolution downstream
 
@@ -197,16 +182,16 @@ Note: env var activation only registers the endpoint. Models still come from `se
 
 ### Phase 2: Docs
 
-#### Step 8: `packages/coding-agent/src/cli/args.ts` — env var docs (~L320)
+#### Step 7: `packages/coding-agent/src/cli/args.ts` — env var docs (~L320)
 
 - `AZURE_FOUNDRY_ENDPOINT` — Foundry endpoint URL (auto-registers as `azure-foundry-env`)
 - `AZURE_FOUNDRY_KEY` — optional credential name override
 
-#### Step 9: `packages/coding-agent/README.md`
+#### Step 8: `packages/coding-agent/README.md`
 
 Add "Azure Foundry" to Subscriptions list (~L104).
 
-#### Step 10: `packages/coding-agent/docs/providers.md`
+#### Step 9: `packages/coding-agent/docs/providers.md`
 
 Add "Azure Foundry" section under Subscriptions (~L22):
 - Prerequisites: `az login` or `AZURE_CLIENT_ID`/`AZURE_TENANT_ID`/`AZURE_CLIENT_SECRET`
@@ -222,3 +207,24 @@ Add "Azure Foundry" section under Subscriptions (~L22):
 5. Manual: `/foundry list`, `/foundry remove`, `/foundry remove-endpoint`
 6. Manual: streaming through Foundry with Bearer auth works
 7. Manual: two endpoints with same model (different deployment IDs) → both appear in model selector
+
+## TODO (Phase/Step checklist)
+
+- [ ] Phase 1 - Step 1: Implement `AzureFoundryCredential` and extend `AuthCredential` in `AuthStorage`.
+- [ ] Phase 1 - Step 1.1: Add token acquisition + in-memory caching in `AuthStorage.getApiKey()` for `azure-foundry`.
+- [ ] Phase 1 - Step 1.2: Add `getFoundryEndpoints()`, `addFoundryEndpoint()`, `removeFoundryEndpoint()` helpers in `AuthStorage`.
+- [ ] Phase 1 - Step 2: Add `FoundryDeployment` schema and getters/setters to `SettingsManager`.
+- [ ] Phase 1 - Step 3: Add `setFoundryDeploymentSource()` and load Foundry deployments in `ModelRegistry`.
+- [ ] Phase 1 - Step 3.1: Register per-endpoint request auth via `storeProviderRequestConfig(endpointKey, { authHeader: true })`.
+- [ ] Phase 1 - Step 3.2: Ensure Authorization applied per-request via `getApiKeyAndHeaders()` (do not inject into model headers).
+- [ ] Phase 1 - Step 4: Implement interactive `/foundry` commands: `add-endpoint`, `remove-endpoint`, `add`, `modify`, `remove`, `list`.
+- [ ] Phase 1 - Step 5: Prompt user to run `/foundry add` after `add-endpoint` when no deployments exist (interactive-mode).
+- [ ] Phase 1 - Step 6: Add env var activation (`AZURE_FOUNDRY_ENDPOINT` / `AZURE_FOUNDRY_KEY`) in `createAgentSessionServices()`.
+- [ ] Phase 2 - Step 7: Add CLI args docs for `AZURE_FOUNDRY_ENDPOINT` / `AZURE_FOUNDRY_KEY` in `packages/coding-agent/src/cli/args.ts`.
+- [ ] Phase 2 - Step 8: Update `packages/coding-agent/README.md` to include Azure Foundry.
+- [ ] Phase 2 - Step 9: Update `packages/coding-agent/docs/providers.md` with Azure Foundry instructions.
+- [ ] Phase 2 - Step 10: Run `npm run check` and fix errors/warnings in changed files.
+- [ ] MANUAL: Phase 3 - Verification 1: Manual: Verify `/foundry add-endpoint` → `/foundry add` end-to-end flow.
+- [ ] MANUAL: Phase 3 - Verification 2: Manual: Verify env var auto-registration (`AZURE_FOUNDRY_ENDPOINT`) at startup.
+- [ ] MANUAL: Phase 3 - Verification 3: Manual: Validate streaming calls through Foundry use Bearer auth and work end-to-end.
+- [ ] MANUAL: Phase 3 - Verification 4: Manual: Confirm multiple endpoints with same source model appear separately in model selector.

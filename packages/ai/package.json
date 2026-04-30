@@ -53,6 +53,10 @@
 		"./bedrock-provider": {
 			"types": "./dist/bedrock-provider.d.ts",
 			"import": "./dist/bedrock-provider.js"
+		},
+		"./azure-foundry": {
+			"types": "./dist/azure-foundry.d.ts",
+			"import": "./dist/azure-foundry.js"
 		}
 	},
 	"bin": {
@@ -73,6 +77,7 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.90.0",
+		"@azure/identity": "^4.13.1",
 		"@aws-sdk/client-bedrock-runtime": "^3.1030.0",
 		"@google/genai": "^1.40.0",
 		"@mistralai/mistralai": "^2.2.0",

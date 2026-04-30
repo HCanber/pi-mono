@@ -6,8 +6,8 @@
  * try to refresh tokens simultaneously.
  */
 
-import { DefaultAzureCredential, type TokenCredential } from "@azure/identity";
 import {
+	AzureFoundryTokenCache,
 	findEnvKeys,
 	getEnvApiKey,
 	type OAuthCredentials,
@@ -194,19 +194,13 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 /**
  * Credential storage backed by a JSON file.
  */
-interface AzureTokenCache {
-	token: string;
-	expiresOnTimestamp: number;
-}
-
 export class AuthStorage {
 	private data: AuthStorageData = {};
 	private runtimeOverrides: Map<string, string> = new Map();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
-	private azureTokenCache: Map<string, AzureTokenCache> = new Map();
-	private azureCredential: TokenCredential | undefined = undefined;
+	private azureFoundryTokenCache = new AzureFoundryTokenCache();
 
 	private constructor(private storage: AuthStorageBackend) {
 		this.reload();
@@ -363,7 +357,7 @@ export class AuthStorage {
 
 	/** Remove an Azure Foundry endpoint credential and its cached token. */
 	removeFoundryEndpoint(key: string): void {
-		this.azureTokenCache.delete(key);
+		this.azureFoundryTokenCache.invalidate();
 		this.remove(key);
 	}
 
@@ -478,26 +472,6 @@ export class AuthStorage {
 		return result;
 	}
 
-	private async getAzureFoundryToken(key: string): Promise<string | undefined> {
-		const cached = this.azureTokenCache.get(key);
-		if (cached && Date.now() < cached.expiresOnTimestamp - 60_000) {
-			return cached.token;
-		}
-
-		try {
-			if (!this.azureCredential) {
-				this.azureCredential = new DefaultAzureCredential();
-			}
-			const result = await this.azureCredential.getToken("https://cognitiveservices.azure.com/.default");
-			if (!result) return undefined;
-			this.azureTokenCache.set(key, { token: result.token, expiresOnTimestamp: result.expiresOnTimestamp });
-			return result.token;
-		} catch (error) {
-			this.recordError(error);
-			return undefined;
-		}
-	}
-
 	/**
 	 * Get API key for a provider.
 	 * Priority:
@@ -522,7 +496,7 @@ export class AuthStorage {
 		}
 
 		if (cred?.type === "azure-foundry") {
-			return this.getAzureFoundryToken(providerId);
+			return this.azureFoundryTokenCache.getToken();
 		}
 
 		if (cred?.type === "oauth") {

@@ -32,6 +32,7 @@ import {
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.js";
+import type { FoundryDeployment } from "./settings-manager.js";
 
 // Schema for OpenRouter routing preferences
 const PercentileCutoffsSchema = Type.Object({
@@ -318,6 +319,7 @@ export class ModelRegistry {
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private loadError: string | undefined = undefined;
+	private foundryDeploymentGetter: (() => FoundryDeployment[]) | undefined = undefined;
 
 	private constructor(
 		readonly authStorage: AuthStorage,
@@ -332,6 +334,14 @@ export class ModelRegistry {
 
 	static inMemory(authStorage: AuthStorage): ModelRegistry {
 		return new ModelRegistry(authStorage, undefined);
+	}
+
+	/**
+	 * Set the getter called during each refresh() to supply Foundry deployments.
+	 * Pass a callback so that every refresh reads the live settings snapshot.
+	 */
+	setFoundryDeploymentSource(getter: () => FoundryDeployment[]): void {
+		this.foundryDeploymentGetter = getter;
 	}
 
 	/**
@@ -382,6 +392,44 @@ export class ModelRegistry {
 			const cred = this.authStorage.get(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
 				combined = oauthProvider.modifyModels(combined, cred);
+			}
+		}
+
+		// Load Azure Foundry deployments from settings
+		const foundryDeployments = this.foundryDeploymentGetter?.() ?? [];
+		for (const deployment of foundryDeployments) {
+			const cred = this.authStorage.get(deployment.endpointKey);
+			if (!cred || cred.type !== "azure-foundry") continue;
+
+			const sourceModel = combined.find(
+				(m) => m.provider === deployment.sourceProvider && m.id === deployment.sourceModelId,
+			);
+			if (!sourceModel) continue;
+
+			const foundryModel: Model<Api> = {
+				...sourceModel,
+				provider: deployment.endpointKey,
+				id: deployment.deploymentId,
+				name: deployment.name ?? `${sourceModel.name} (Foundry)`,
+				baseUrl: cred.endpoint,
+				cost: {
+					input: deployment.cost?.input ?? sourceModel.cost.input,
+					output: deployment.cost?.output ?? sourceModel.cost.output,
+					cacheRead: deployment.cost?.cacheRead ?? sourceModel.cost.cacheRead,
+					cacheWrite: deployment.cost?.cacheWrite ?? sourceModel.cost.cacheWrite,
+				},
+				headers: undefined,
+			};
+
+			this.storeProviderRequestConfig(deployment.endpointKey, { authHeader: true });
+
+			const existingIdx = combined.findIndex(
+				(m) => m.provider === foundryModel.provider && m.id === foundryModel.id,
+			);
+			if (existingIdx >= 0) {
+				combined[existingIdx] = foundryModel;
+			} else {
+				combined.push(foundryModel);
 			}
 		}
 

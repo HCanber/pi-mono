@@ -132,8 +132,20 @@ export async function createAgentSessionServices(
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
+
+	// Auto-register Azure Foundry endpoint from env var
+	const foundryEndpointEnv = process.env.AZURE_FOUNDRY_ENDPOINT;
+	if (foundryEndpointEnv) {
+		const foundryKeyEnv = process.env.AZURE_FOUNDRY_KEY ?? "azure-foundry-env";
+		authStorage.addFoundryEndpoint(foundryKeyEnv, foundryEndpointEnv);
+	}
+
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+
+	// Wire foundry deployment source so every refresh() reads the live settings
+	modelRegistry.setFoundryDeploymentSource(() => settingsManager.getFoundryDeployments());
+	modelRegistry.refresh();
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		cwd,

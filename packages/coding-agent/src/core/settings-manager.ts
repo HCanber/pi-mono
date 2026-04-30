@@ -56,6 +56,15 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface FoundryDeployment {
+	endpointKey: string; // auth.json key, e.g., "azure-foundry-my-resource"
+	sourceProvider: string; // e.g., "anthropic"
+	sourceModelId: string; // e.g., "claude-opus-4-7"
+	deploymentId: string; // Foundry deployment name
+	name?: string; // display name override
+	cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -110,6 +119,7 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	foundryDeployments?: FoundryDeployment[]; // Azure Foundry deployment catalog
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -1062,6 +1072,52 @@ export class SettingsManager {
 	setWarnings(warnings: WarningSettings): void {
 		this.globalSettings.warnings = { ...warnings };
 		this.markModified("warnings");
+		this.save();
+	}
+
+	getFoundryDeployments(): FoundryDeployment[] {
+		return structuredClone(this.globalSettings.foundryDeployments ?? []);
+	}
+
+	getFoundryDeploymentsForEndpoint(endpointKey: string): FoundryDeployment[] {
+		return this.getFoundryDeployments().filter((d) => d.endpointKey === endpointKey);
+	}
+
+	addFoundryDeployment(deployment: FoundryDeployment): void {
+		const deployments = this.getFoundryDeployments();
+		deployments.push(deployment);
+		this.globalSettings.foundryDeployments = deployments;
+		this.markModified("foundryDeployments");
+		this.save();
+	}
+
+	updateFoundryDeployment(
+		endpointKey: string,
+		deploymentId: string,
+		updates: Partial<Pick<FoundryDeployment, "deploymentId" | "name" | "cost">>,
+	): void {
+		const deployments = this.getFoundryDeployments();
+		const idx = deployments.findIndex((d) => d.endpointKey === endpointKey && d.deploymentId === deploymentId);
+		if (idx === -1) return;
+		deployments[idx] = { ...deployments[idx], ...updates };
+		this.globalSettings.foundryDeployments = deployments;
+		this.markModified("foundryDeployments");
+		this.save();
+	}
+
+	removeFoundryDeployment(endpointKey: string, deploymentId: string): void {
+		const deployments = this.getFoundryDeployments().filter(
+			(d) => !(d.endpointKey === endpointKey && d.deploymentId === deploymentId),
+		);
+		this.globalSettings.foundryDeployments = deployments;
+		this.markModified("foundryDeployments");
+		this.save();
+	}
+
+	removeFoundryDeploymentsForEndpoint(endpointKey: string): void {
+		const deployments = this.getFoundryDeployments().filter((d) => d.endpointKey !== endpointKey);
+		this.globalSettings.foundryDeployments = deployments;
+		this.markModified("foundryDeployments");
 		this.save();
 	}
 }

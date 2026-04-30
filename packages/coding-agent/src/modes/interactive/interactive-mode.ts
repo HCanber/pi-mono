@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
 	type AssistantMessage,
+	getModels,
 	getProviders,
 	type ImageContent,
 	type Message,
@@ -75,6 +76,7 @@ import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
+import type { FoundryDeployment } from "../../core/settings-manager.js";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import type { SourceInfo } from "../../core/source-info.js";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.js";
@@ -2540,6 +2542,12 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/foundry" || text.startsWith("/foundry ")) {
+				const sub = text === "/foundry" ? "" : text.slice("/foundry ".length).trim();
+				this.editor.setText("");
+				void this.handleFoundryCommand(sub);
+				return;
+			}
 			if (text === "/new") {
 				this.editor.setText("");
 				await this.handleClearCommand();
@@ -4390,6 +4398,10 @@ export class InteractiveMode {
 			if (!credential) {
 				continue;
 			}
+			// azure-foundry credentials are managed via /foundry remove-endpoint, not /logout
+			if (credential.type === "azure-foundry") {
+				continue;
+			}
 			options.push({
 				id: providerId,
 				name:
@@ -4512,6 +4524,363 @@ export class InteractiveMode {
 			return { component: selector, focus: selector };
 		});
 	}
+
+	// ---- Azure Foundry management ----
+
+	private async handleFoundryCommand(sub: string): Promise<void> {
+		const subcommand = sub.trim();
+		if (subcommand === "" || subcommand === "list") {
+			this.showFoundryList();
+		} else if (subcommand === "add-endpoint") {
+			await this.showFoundryAddEndpoint();
+		} else if (subcommand === "remove-endpoint") {
+			this.showFoundryRemoveEndpoint();
+		} else if (subcommand === "add") {
+			await this.showFoundryAdd();
+		} else if (subcommand === "modify") {
+			await this.showFoundryModify();
+		} else if (subcommand === "remove") {
+			this.showFoundryRemoveDeployment();
+		} else {
+			this.showFoundryMainMenu();
+		}
+	}
+
+	private showFoundryMainMenu(): void {
+		const options = ["list", "add-endpoint", "remove-endpoint", "add", "modify", "remove"];
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Foundry command:",
+				options,
+				(option) => {
+					done();
+					void this.handleFoundryCommand(option);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private showFoundryList(): void {
+		const authStorage = this.session.modelRegistry.authStorage;
+		const endpoints = authStorage.getFoundryEndpoints();
+		if (endpoints.length === 0) {
+			this.showStatus("No Azure Foundry endpoints configured. Use /foundry add-endpoint to add one.");
+			return;
+		}
+
+		const deployments = this.settingsManager.getFoundryDeployments();
+		const lines: string[] = ["Azure Foundry endpoints:"];
+		for (const ep of endpoints) {
+			lines.push(`  ${ep.key}: ${ep.endpoint}`);
+			const epDeployments = deployments.filter((d) => d.endpointKey === ep.key);
+			if (epDeployments.length === 0) {
+				lines.push("    (no deployments)");
+			} else {
+				for (const d of epDeployments) {
+					const displayName = d.name ?? `${d.sourceProvider}/${d.sourceModelId}`;
+					lines.push(`    ${d.deploymentId} → ${displayName}`);
+				}
+			}
+		}
+		for (const line of lines) {
+			this.showStatus(line);
+		}
+	}
+
+	private async showFoundryAddEndpoint(): Promise<void> {
+		const authStorage = this.session.modelRegistry.authStorage;
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		const dialog = new LoginDialogComponent(this.ui, "", () => {}, undefined, "Add Azure Foundry Endpoint");
+		this.editorContainer.clear();
+		this.editorContainer.addChild(dialog);
+		this.ui.setFocus(dialog);
+		this.ui.requestRender();
+
+		let key = "";
+		try {
+			const rawName = (await dialog.showPrompt("Enter a name for this endpoint:", "my-resource")).trim();
+			if (!rawName) throw new Error("Name cannot be empty.");
+
+			key = rawName.startsWith("azure-foundry-") ? rawName : `azure-foundry-${rawName}`;
+			const endpoint = (
+				await dialog.showPrompt("Enter endpoint URL:", "https://myresource.services.ai.azure.com")
+			).trim();
+			if (!endpoint) throw new Error("Endpoint URL cannot be empty.");
+
+			// Validate URL format
+			try {
+				new URL(endpoint);
+			} catch {
+				throw new Error(`Invalid endpoint URL: ${endpoint}`);
+			}
+
+			// Store credential
+			authStorage.addFoundryEndpoint(key, endpoint);
+			this.session.modelRegistry.refresh();
+
+			const hasDeployments = this.settingsManager.getFoundryDeploymentsForEndpoint(key).length > 0;
+			restoreEditor();
+			this.showStatus(`Added Azure Foundry endpoint "${key}" (${endpoint}).`);
+			if (!hasDeployments) {
+				this.showStatus(`No deployments configured for "${key}". Run /foundry add to configure models.`);
+			}
+			await this.updateAvailableProviderCount();
+		} catch (error: unknown) {
+			if (key) authStorage.removeFoundryEndpoint(key);
+			restoreEditor();
+			const msg = error instanceof Error ? error.message : String(error);
+			if (msg !== "Login cancelled") {
+				this.showError(`Failed to add Foundry endpoint: ${msg}`);
+			}
+		}
+	}
+
+	private showFoundryRemoveEndpoint(): void {
+		const authStorage = this.session.modelRegistry.authStorage;
+		const endpoints = authStorage.getFoundryEndpoints();
+		if (endpoints.length === 0) {
+			this.showStatus("No Azure Foundry endpoints configured.");
+			return;
+		}
+
+		const options = endpoints.map((ep) => ep.key);
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select endpoint to remove:",
+				options,
+				(key) => {
+					done();
+					this.settingsManager.removeFoundryDeploymentsForEndpoint(key);
+					authStorage.removeFoundryEndpoint(key);
+					this.session.modelRegistry.refresh();
+					void this.updateAvailableProviderCount();
+					this.showStatus(`Removed Azure Foundry endpoint "${key}" and its deployments.`);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private async showFoundryAdd(): Promise<void> {
+		const authStorage = this.session.modelRegistry.authStorage;
+		const endpoints = authStorage.getFoundryEndpoints();
+		if (endpoints.length === 0) {
+			this.showStatus("No Azure Foundry endpoints configured. Run /foundry add-endpoint first.");
+			return;
+		}
+
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		if (endpoints.length === 1) {
+			await this.showFoundryAddWithEndpoint(endpoints[0].key, restoreEditor);
+		} else {
+			const options = endpoints.map((ep) => ep.key);
+			this.showSelector((done) => {
+				const selector = new ExtensionSelectorComponent(
+					"Select endpoint:",
+					options,
+					(key) => {
+						done();
+						void this.showFoundryAddWithEndpoint(key, restoreEditor);
+					},
+					() => {
+						done();
+						this.ui.requestRender();
+					},
+				);
+				return { component: selector, focus: selector };
+			});
+		}
+	}
+
+	private async showFoundryAddWithEndpoint(endpointKey: string, restoreEditor: () => void): Promise<void> {
+		// Build list of source models
+		const sourceModels: Array<{ label: string; provider: string; id: string }> = [];
+		for (const provider of getProviders()) {
+			for (const model of getModels(provider as Parameters<typeof getModels>[0])) {
+				sourceModels.push({ label: `${provider}/${model.id}`, provider, id: model.id });
+			}
+		}
+		sourceModels.sort((a, b) => a.label.localeCompare(b.label));
+		const modelLabels = sourceModels.map((m) => m.label);
+
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select source model:",
+				modelLabels,
+				async (label) => {
+					done();
+					const source = sourceModels.find((m) => m.label === label);
+					if (!source) return;
+
+					const dialog = new LoginDialogComponent(this.ui, "", () => {}, undefined, "Add Foundry Deployment");
+					this.editorContainer.clear();
+					this.editorContainer.addChild(dialog);
+					this.ui.setFocus(dialog);
+					this.ui.requestRender();
+
+					try {
+						const deploymentId = (await dialog.showPrompt("Enter deployment ID:", source.id)).trim() || source.id;
+
+						const nameInput = (await dialog.showPrompt("Enter display name (leave empty for default):")).trim();
+
+						const deployment: FoundryDeployment = {
+							endpointKey,
+							sourceProvider: source.provider,
+							sourceModelId: source.id,
+							deploymentId,
+							name: nameInput || undefined,
+						};
+
+						this.settingsManager.addFoundryDeployment(deployment);
+						this.session.modelRegistry.refresh();
+						await this.updateAvailableProviderCount();
+						restoreEditor();
+						this.showStatus(`Added deployment "${deploymentId}" for ${label} on ${endpointKey}.`);
+					} catch (error: unknown) {
+						restoreEditor();
+						const msg = error instanceof Error ? error.message : String(error);
+						if (msg !== "Login cancelled") {
+							this.showError(`Failed to add deployment: ${msg}`);
+						}
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private async showFoundryModify(): Promise<void> {
+		const deployments = this.settingsManager.getFoundryDeployments();
+		if (deployments.length === 0) {
+			this.showStatus("No Foundry deployments configured. Use /foundry add to add one.");
+			return;
+		}
+
+		const options = deployments.map((d) => `${d.endpointKey}: ${d.deploymentId}`);
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select deployment to modify:",
+				options,
+				async (label) => {
+					done();
+					const idx = options.indexOf(label);
+					const deployment = deployments[idx];
+					if (!deployment) return;
+
+					const dialog = new LoginDialogComponent(this.ui, "", () => {}, undefined, "Modify Foundry Deployment");
+					this.editorContainer.clear();
+					this.editorContainer.addChild(dialog);
+					this.ui.setFocus(dialog);
+					this.ui.requestRender();
+
+					try {
+						const newDeploymentId = (
+							await dialog.showPrompt(`Deployment ID [${deployment.deploymentId}] (leave empty to keep):`)
+						).trim();
+
+						const currentName = deployment.name ?? "";
+						const newName = (
+							await dialog.showPrompt(`Display name [${currentName || "none"}] (leave empty to keep):`)
+						).trim();
+
+						const updates: Partial<Pick<FoundryDeployment, "deploymentId" | "name">> = {};
+						if (newDeploymentId) updates.deploymentId = newDeploymentId;
+						if (newName) updates.name = newName;
+
+						if (Object.keys(updates).length > 0) {
+							this.settingsManager.updateFoundryDeployment(
+								deployment.endpointKey,
+								deployment.deploymentId,
+								updates,
+							);
+							this.session.modelRegistry.refresh();
+							await this.updateAvailableProviderCount();
+							this.showStatus(`Updated deployment "${deployment.deploymentId}" on ${deployment.endpointKey}.`);
+						} else {
+							this.showStatus("No changes made.");
+						}
+						restoreEditor();
+					} catch (error: unknown) {
+						restoreEditor();
+						const msg = error instanceof Error ? error.message : String(error);
+						if (msg !== "Login cancelled") {
+							this.showError(`Failed to modify deployment: ${msg}`);
+						}
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private showFoundryRemoveDeployment(): void {
+		const deployments = this.settingsManager.getFoundryDeployments();
+		if (deployments.length === 0) {
+			this.showStatus("No Foundry deployments configured.");
+			return;
+		}
+
+		const options = deployments.map((d) => `${d.endpointKey}: ${d.deploymentId}`);
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Select deployment to remove:",
+				options,
+				(label) => {
+					done();
+					const idx = options.indexOf(label);
+					const deployment = deployments[idx];
+					if (!deployment) return;
+					this.settingsManager.removeFoundryDeployment(deployment.endpointKey, deployment.deploymentId);
+					this.session.modelRegistry.refresh();
+					void this.updateAvailableProviderCount();
+					this.showStatus(`Removed deployment "${deployment.deploymentId}" from ${deployment.endpointKey}.`);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	// ---- end Azure Foundry management ----
 
 	private async completeProviderAuthentication(
 		providerId: string,

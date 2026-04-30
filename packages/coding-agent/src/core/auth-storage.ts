@@ -6,6 +6,7 @@
  * try to refresh tokens simultaneously.
  */
 
+import { DefaultAzureCredential, type TokenCredential } from "@azure/identity";
 import {
 	findEnvKeys,
 	getEnvApiKey,
@@ -29,7 +30,12 @@ export type OAuthCredential = {
 	type: "oauth";
 } & OAuthCredentials;
 
-export type AuthCredential = ApiKeyCredential | OAuthCredential;
+export type AzureFoundryCredential = {
+	type: "azure-foundry";
+	endpoint: string;
+};
+
+export type AuthCredential = ApiKeyCredential | OAuthCredential | AzureFoundryCredential;
 
 export type AuthStorageData = Record<string, AuthCredential>;
 
@@ -188,12 +194,19 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 /**
  * Credential storage backed by a JSON file.
  */
+interface AzureTokenCache {
+	token: string;
+	expiresOnTimestamp: number;
+}
+
 export class AuthStorage {
 	private data: AuthStorageData = {};
 	private runtimeOverrides: Map<string, string> = new Map();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
+	private azureTokenCache: Map<string, AzureTokenCache> = new Map();
+	private azureCredential: TokenCredential | undefined = undefined;
 
 	private constructor(private storage: AuthStorageBackend) {
 		this.reload();
@@ -336,11 +349,33 @@ export class AuthStorage {
 		return false;
 	}
 
+	/** Return all Azure Foundry endpoint entries. */
+	getFoundryEndpoints(): Array<{ key: string; endpoint: string }> {
+		return Object.entries(this.data)
+			.filter((entry): entry is [string, AzureFoundryCredential] => entry[1].type === "azure-foundry")
+			.map(([key, cred]) => ({ key, endpoint: cred.endpoint }));
+	}
+
+	/** Store a new (or replace an existing) Azure Foundry endpoint credential. */
+	addFoundryEndpoint(key: string, endpoint: string): void {
+		this.set(key, { type: "azure-foundry", endpoint });
+	}
+
+	/** Remove an Azure Foundry endpoint credential and its cached token. */
+	removeFoundryEndpoint(key: string): void {
+		this.azureTokenCache.delete(key);
+		this.remove(key);
+	}
+
 	/**
 	 * Return auth status without exposing credential values or refreshing tokens.
 	 */
 	getAuthStatus(provider: string): AuthStatus {
-		if (this.data[provider]) {
+		const cred = this.data[provider];
+		if (cred?.type === "azure-foundry") {
+			return { configured: true, source: "stored" };
+		}
+		if (cred) {
 			return { configured: true, source: "stored" };
 		}
 
@@ -443,14 +478,35 @@ export class AuthStorage {
 		return result;
 	}
 
+	private async getAzureFoundryToken(key: string): Promise<string | undefined> {
+		const cached = this.azureTokenCache.get(key);
+		if (cached && Date.now() < cached.expiresOnTimestamp - 60_000) {
+			return cached.token;
+		}
+
+		try {
+			if (!this.azureCredential) {
+				this.azureCredential = new DefaultAzureCredential();
+			}
+			const result = await this.azureCredential.getToken("https://cognitiveservices.azure.com/.default");
+			if (!result) return undefined;
+			this.azureTokenCache.set(key, { token: result.token, expiresOnTimestamp: result.expiresOnTimestamp });
+			return result.token;
+		} catch (error) {
+			this.recordError(error);
+			return undefined;
+		}
+	}
+
 	/**
 	 * Get API key for a provider.
 	 * Priority:
 	 * 1. Runtime override (CLI --api-key)
 	 * 2. API key from auth.json
 	 * 3. OAuth token from auth.json (auto-refreshed with locking)
-	 * 4. Environment variable
-	 * 5. Fallback resolver (models.json custom providers)
+	 * 4. Azure AD token from auth.json (azure-foundry credential)
+	 * 5. Environment variable
+	 * 6. Fallback resolver (models.json custom providers)
 	 */
 	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
 		// Runtime override takes highest priority
@@ -463,6 +519,10 @@ export class AuthStorage {
 
 		if (cred?.type === "api_key") {
 			return resolveConfigValue(cred.key);
+		}
+
+		if (cred?.type === "azure-foundry") {
+			return this.getAzureFoundryToken(providerId);
 		}
 
 		if (cred?.type === "oauth") {

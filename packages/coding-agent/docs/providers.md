@@ -173,6 +173,70 @@ export AWS_BEDROCK_SKIP_AUTH=1
 export AWS_BEDROCK_FORCE_HTTP1=1
 ```
 
+### Azure Foundry
+
+Azure Foundry routes model traffic through Azure AI endpoints using Azure AD bearer tokens. Uses [`DefaultAzureCredential`](https://learn.microsoft.com/en-us/javascript/api/@azure/identity/defaultazurecredential) which supports `az login`, service principals, managed identity, and more.
+
+**Prerequisites:** Authenticate via one of:
+
+```bash
+# Interactive browser login
+az login
+
+# Service principal
+export AZURE_CLIENT_ID=...
+export AZURE_TENANT_ID=...
+export AZURE_CLIENT_SECRET=...
+```
+
+**Interactive setup:**
+
+```
+/foundry add-endpoint   # Register an endpoint (name + URL)
+/foundry add            # Add a deployment (pick endpoint → source model → deployment ID)
+/foundry list           # Show all endpoints and deployments
+/foundry modify         # Edit a deployment's ID or display name
+/foundry remove         # Remove a deployment
+/foundry remove-endpoint # Remove an endpoint and all its deployments
+```
+
+**Environment variable registration (CI / headless):**
+
+```bash
+export AZURE_FOUNDRY_ENDPOINT=https://myresource.services.ai.azure.com
+# Optional: override the credential key name (default: azure-foundry-env)
+export AZURE_FOUNDRY_KEY=azure-foundry-prod
+```
+
+The endpoint is auto-registered at startup. Model deployments still come from `settings.json` (`foundryDeployments` array).
+
+**`auth.json` shape (written by `/foundry add-endpoint`):**
+
+```json
+{
+  "azure-foundry-my-resource": {
+    "type": "azure-foundry",
+    "endpoint": "https://myresource.services.ai.azure.com"
+  }
+}
+```
+
+**`settings.json` shape (written by `/foundry add`):**
+
+```json
+{
+  "foundryDeployments": [
+    {
+      "endpointKey": "azure-foundry-my-resource",
+      "sourceProvider": "anthropic",
+      "sourceModelId": "claude-opus-4-7",
+      "deploymentId": "my-claude",
+      "name": "Claude Opus 4.7 (Foundry)"
+    }
+  ]
+}
+```
+
 ### Cloudflare Workers AI
 
 `CLOUDFLARE_API_KEY` can be set via `/login`. `CLOUDFLARE_ACCOUNT_ID` must be set as an environment variable.
